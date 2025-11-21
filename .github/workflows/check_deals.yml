@@ -1,0 +1,38 @@
+name: Check RFD Deals
+
+on:
+  schedule:
+    # Runs every 5 minutes
+    - cron: '*/5 * * * *'
+  # Allows manual testing
+  workflow_dispatch:
+
+jobs:
+  check-deals:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Grant write permission to this specific job
+      
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install feedparser requests
+
+      - name: Run Agent
+        run: python rfd_agent.py
+
+      - name: Commit and Push History
+        run: |
+          git config --global user.name 'RFD Bot'
+          git config --global user.email 'bot@noreply.github.com'
+          git add last_seen_id.txt
+          # Check if there are changes before committing to prevent errors
+          git diff-index --quiet HEAD || (git commit -m "Update last seen deal" && git push)

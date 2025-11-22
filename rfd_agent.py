@@ -3,28 +3,58 @@ import requests
 import time
 import os
 import re
+import json
 
 # --- CONFIGURATION ---
 RSS_URL = "https://forums.redflagdeals.com/feed/forum/9"
-# CHANGE THIS to something unique so strangers don't see your alerts!
-NTFY_TOPIC = "rfd-hotdeals" 
+NTFY_TOPIC = "rfd-hotdeals"
 NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
 HISTORY_FILE = "last_seen_id.txt"
 
-# Keywords that trigger a High Priority alert (Priority 5)
+# Remember the last 150 threads to ensure we ignore "bumped" old deals
+MAX_HISTORY = 150
+
 URGENT_KEYWORDS = ["price error", "freebie", "100% off", "lava hot"]
-# Keywords to completely ignore
 IGNORE_KEYWORDS = ["sold out", "oos", "expired"]
 
-def get_last_seen_id():
-    if not os.path.exists(HISTORY_FILE):
-        return None
-    with open(HISTORY_FILE, "r") as f:
-        return f.read().strip()
+def get_thread_id(link):
+    """
+    Extracts the unique thread ID (t=XXXXX) from the URL.
+    """
+    match = re.search(r't=(\d+)', link)
+    if match:
+        return match.group(1)
+    return link # Fallback
 
-def save_last_seen_id(entry_id):
+def get_history():
+    """
+    Loads the list of seen thread IDs.
+    Handles migration from the old single-line file to the new JSON list.
+    """
+    if not os.path.exists(HISTORY_FILE):
+        return []
+    
+    with open(HISTORY_FILE, "r") as f:
+        content = f.read().strip()
+        if not content: return []
+        
+        try:
+            # Try to load as a JSON list
+            return json.loads(content)
+        except json.JSONDecodeError:
+            # Fallback: Old format was a single URL string
+            old_id = get_thread_id(content)
+            return [old_id]
+
+def save_history(seen_ids):
+    """
+    Saves the list of seen IDs, keeping only the most recent MAX_HISTORY.
+    """
+    if len(seen_ids) > MAX_HISTORY:
+        seen_ids = seen_ids[-MAX_HISTORY:]
+        
     with open(HISTORY_FILE, "w") as f:
-        f.write(entry_id)
+        json.dump(seen_ids, f)
 
 def parse_title_info(title):
     retailer = "RFD"
@@ -47,7 +77,7 @@ def parse_title_info(title):
 def send_notification(title, link):
     for kw in IGNORE_KEYWORDS:
         if kw in title.lower():
-            print(f"Ignored: {title}")
+            print(f"Ignored (Filter): {title}")
             return
 
     retailer, priority, tags = parse_title_info(title)
@@ -70,32 +100,47 @@ def send_notification(title, link):
         print(f"Failed: {e}")
 
 def check_feed():
+    print(f"Checking {RSS_URL}...")
     feed = feedparser.parse(RSS_URL)
-    if not feed.entries: return
-
-    last_seen_id = get_last_seen_id()
     
-    if last_seen_id is None:
-        if feed.entries:
-            save_last_seen_id(feed.entries[0].id)
-            print("Initialized history.")
+    if not feed.entries: 
+        return
+
+    seen_ids = get_history()
+    
+    # First run with new logic? Initialize cleanly.
+    if not seen_ids:
+        print("Initializing new history format...")
+        for entry in feed.entries:
+            t_id = get_thread_id(entry.link)
+            seen_ids.append(t_id)
+        save_history(seen_ids)
         return
 
     new_entries = []
+    
     for entry in feed.entries:
-        if entry.id == last_seen_id:
-            break
+        t_id = get_thread_id(entry.link)
+        
+        # IF the ID is in our history list, skip it (it's a bump)
+        if t_id in seen_ids:
+            continue
+            
         new_entries.append(entry)
 
-    if len(new_entries) == len(feed.entries):
+    # Cap at 5 to prevent flood
+    if len(new_entries) > 5:
         new_entries = new_entries[:5]
 
+    # Send oldest first
     for entry in reversed(new_entries):
         send_notification(entry.title, entry.link)
+        
+        t_id = get_thread_id(entry.link)
+        seen_ids.append(t_id)
         time.sleep(1)
 
-    if new_entries:
-        save_last_seen_id(new_entries[-1].id)
+    save_history(seen_ids)
 
 if __name__ == "__main__":
     check_feed()
